@@ -30,3 +30,4 @@ export interface BodyState {
 
 export type CameraMode = 'free' | 'follow' | 'sun';
 export type ScaleMode = 'real' | 'exaggerated';
+export type SimulationMode = 'kepler' | 'nbody';

@@ -3,7 +3,7 @@ import { SolarSystem } from './scene/SolarSystem';
 import { TimeController } from './time/TimeController';
 import { CameraController } from './camera/CameraController';
 import { UIManager } from './ui/UIManager';
-import { ScaleMode, CameraMode } from './types';
+import { ScaleMode, CameraMode, SimulationMode } from './types';
 
 class SolarSystemApp {
   private container: HTMLElement;
@@ -20,6 +20,9 @@ class SolarSystemApp {
   private clock: THREE.Clock = new THREE.Clock();
   private animationId: number = 0;
 
+  private simulationMode: SimulationMode = 'kepler';
+  private lastJD: number = 0;
+
   constructor(container: HTMLElement) {
     this.container = container;
     this.init();
@@ -34,6 +37,7 @@ class SolarSystemApp {
     this.createUI();
     this.setupEventListeners();
 
+    this.lastJD = this.timeController.getJD();
     this.solarSystem.update(this.timeController.getDaysSinceJ2000());
 
     this.animate();
@@ -108,12 +112,77 @@ class SolarSystemApp {
         onGotoJ2000: () => this.timeController.goToJ2000(),
         onGotoNow: () => this.timeController.goToNow(),
         onDateChange: (date: Date) => this.timeController.setDate(date),
+        onSimulationModeChange: (mode: SimulationMode) => {
+          this.switchSimulationMode(mode);
+        },
+        onPredictOrbit: () => this.handlePredictOrbit(),
+        onHidePrediction: () => this.handleHidePrediction(),
+        onToggleEnergyPanel: () => this.handleToggleEnergyPanel(),
       },
       this.timeController
     );
 
     this.uiManager.setActiveCameraMode('sun');
     this.uiManager.setActiveScaleMode('exaggerated');
+    this.uiManager.setActiveSimMode('kepler');
+  }
+
+  private switchSimulationMode(mode: SimulationMode): void {
+    this.simulationMode = mode;
+    this.solarSystem.setSimulationMode(mode);
+
+    if (mode === 'nbody') {
+      this.solarSystem.initNBody(this.timeController.getDaysSinceJ2000());
+    } else {
+      this.solarSystem.hidePredictions();
+      this.uiManager.setPredictionActive(false);
+    }
+
+    this.uiManager.setActiveSimMode(mode);
+
+    if (mode === 'kepler' && this.uiManager.isEnergyPanelVisible()) {
+      this.uiManager.hideEnergyPanel();
+    }
+  }
+
+  private handlePredictOrbit(): void {
+    if (this.simulationMode !== 'nbody') {
+      this.switchSimulationMode('nbody');
+    }
+
+    if (!this.solarSystem.getNBodyState()) {
+      this.solarSystem.initNBody(this.timeController.getDaysSinceJ2000());
+    }
+
+    this.solarSystem.computePrediction(100);
+    this.uiManager.setPredictionActive(true);
+  }
+
+  private handleHidePrediction(): void {
+    this.solarSystem.hidePredictions();
+    this.uiManager.setPredictionActive(false);
+  }
+
+  private handleToggleEnergyPanel(): void {
+    if (this.uiManager.isEnergyPanelVisible()) {
+      this.uiManager.hideEnergyPanel();
+    } else {
+      if (this.simulationMode !== 'nbody') {
+        this.switchSimulationMode('nbody');
+      }
+      if (!this.solarSystem.getNBodyState()) {
+        this.solarSystem.initNBody(this.timeController.getDaysSinceJ2000());
+      }
+      this.uiManager.showEnergyPanel();
+      this.updateEnergyPanel();
+    }
+  }
+
+  private updateEnergyPanel(): void {
+    if (!this.uiManager.isEnergyPanelVisible()) return;
+    const energies = this.solarSystem.getOrbitalEnergies();
+    const systemEnergy = this.solarSystem.getSystemEnergy();
+    this.uiManager.updateEnergyPanel(energies, systemEnergy);
   }
 
   private setupEventListeners(): void {
@@ -137,6 +206,16 @@ class SolarSystemApp {
         } else {
           this.timeController.reverse();
         }
+      }
+      if (e.key === 'n' || e.key === 'N') {
+        const newMode: SimulationMode = this.simulationMode === 'kepler' ? 'nbody' : 'kepler';
+        this.switchSimulationMode(newMode);
+      }
+      if (e.key === 'p' || e.key === 'P') {
+        this.handlePredictOrbit();
+      }
+      if (e.key === 'e' || e.key === 'E') {
+        this.handleToggleEnergyPanel();
       }
     });
   }
@@ -183,11 +262,26 @@ class SolarSystemApp {
 
     this.timeController.update();
 
+    const currentJD = this.timeController.getJD();
+
+    if (this.simulationMode === 'nbody') {
+      const deltaJD = currentJD - this.lastJD;
+      if (Math.abs(deltaJD) > 0) {
+        this.solarSystem.updateNBody(deltaJD);
+      }
+    }
+
+    this.lastJD = currentJD;
+
     this.solarSystem.update(this.timeController.getDaysSinceJ2000());
 
     this.cameraController.update(delta);
 
     this.uiManager.update();
+
+    if (this.simulationMode === 'nbody' && this.uiManager.isEnergyPanelVisible()) {
+      this.updateEnergyPanel();
+    }
 
     this.renderer.render(this.solarSystem.scene, this.camera);
   }

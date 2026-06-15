@@ -1,7 +1,8 @@
-import { BodyData, ScaleMode, CameraMode } from '../types';
+import { BodyData, ScaleMode, CameraMode, SimulationMode } from '../types';
 import { formatDistance, formatSize } from '../scene/scale';
 import { orbitalElementsToPosition } from '../astro/coordinates';
 import { TimeController } from '../time/TimeController';
+import { OrbitalEnergyInfo } from '../astro/nbody';
 
 export interface UICallbacks {
   onPlayPause: () => void;
@@ -15,6 +16,10 @@ export interface UICallbacks {
   onGotoJ2000: () => void;
   onGotoNow: () => void;
   onDateChange: (date: Date) => void;
+  onSimulationModeChange: (mode: SimulationMode) => void;
+  onPredictOrbit: () => void;
+  onHidePrediction: () => void;
+  onToggleEnergyPanel: () => void;
 }
 
 export class UIManager {
@@ -27,6 +32,8 @@ export class UIManager {
   private timeDisplay!: HTMLElement;
   private speedDisplay!: HTMLElement;
   private speedSlider!: HTMLInputElement;
+  private energyPanel!: HTMLElement;
+  private energyPanelVisible: boolean = false;
 
   private selectedBody: BodyData | null = null;
 
@@ -41,6 +48,7 @@ export class UIManager {
   private createUI(): void {
     this.createControlPanel();
     this.createInfoPanel();
+    this.createEnergyPanel();
   }
 
   private createControlPanel(): void {
@@ -55,6 +63,8 @@ export class UIManager {
       border-radius: 12px;
       font-size: 14px;
       min-width: 280px;
+      max-height: calc(100vh - 40px);
+      overflow-y: auto;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
       border: 1px solid rgba(100, 150, 255, 0.2);
       backdrop-filter: blur(10px);
@@ -73,6 +83,8 @@ export class UIManager {
     this.controlPanel.appendChild(this.createTimeControls());
     this.controlPanel.appendChild(this.createSpeedControls());
     this.controlPanel.appendChild(this.createDateControls());
+    this.controlPanel.appendChild(this.createSimulationControls());
+    this.controlPanel.appendChild(this.createPredictionControls());
     this.controlPanel.appendChild(this.createViewControls());
     this.controlPanel.appendChild(this.createScaleControls());
     this.controlPanel.appendChild(this.createPlanetList());
@@ -158,6 +170,59 @@ export class UIManager {
     return section;
   }
 
+  private createSimulationControls(): HTMLElement {
+    const section = this.createSection('模拟模式');
+
+    const buttonRow = document.createElement('div');
+    buttonRow.style.cssText = 'display: flex; gap: 4px; margin-bottom: 8px;';
+
+    const keplerBtn = this.createSimToggleButton('开普勒', 'kepler', () => {
+      this.callbacks.onSimulationModeChange('kepler');
+    });
+    const nbodyBtn = this.createSimToggleButton('N-body', 'nbody', () => {
+      this.callbacks.onSimulationModeChange('nbody');
+    });
+
+    buttonRow.appendChild(keplerBtn);
+    buttonRow.appendChild(nbodyBtn);
+    section.appendChild(buttonRow);
+
+    const descRow = document.createElement('div');
+    descRow.style.cssText = 'font-size: 10px; color: #889; line-height: 1.4;';
+    descRow.innerHTML = '开普勒: 二体椭圆轨道<br>N-body: 全引力摄动模拟 (Velocity Verlet)';
+    section.appendChild(descRow);
+
+    return section;
+  }
+
+  private createPredictionControls(): HTMLElement {
+    const section = this.createSection('轨道预测');
+
+    const buttonRow = document.createElement('div');
+    buttonRow.style.cssText = 'display: flex; gap: 8px; margin-bottom: 8px;';
+
+    const predictBtn = this.createButton('🔮 预测100年', () => {
+      this.callbacks.onPredictOrbit();
+    });
+    predictBtn.id = 'predictBtn';
+
+    const hideBtn = this.createButton('✕ 清除', () => {
+      this.callbacks.onHidePrediction();
+    }, true);
+    hideBtn.id = 'hidePredictBtn';
+
+    buttonRow.appendChild(predictBtn);
+    buttonRow.appendChild(hideBtn);
+    section.appendChild(buttonRow);
+
+    const descRow = document.createElement('div');
+    descRow.style.cssText = 'font-size: 10px; color: #889; line-height: 1.4;';
+    descRow.innerHTML = 'N-body模式下：以当前状态向前积分100年<br>虚线为预测轨迹，实线为开普勒椭圆';
+    section.appendChild(descRow);
+
+    return section;
+  }
+
   private createViewControls(): HTMLElement {
     const section = this.createSection('视图模式');
 
@@ -172,6 +237,11 @@ export class UIManager {
     buttonRow.appendChild(followBtn);
     buttonRow.appendChild(freeBtn);
     section.appendChild(buttonRow);
+
+    const energyBtn = this.createButton('⚡ 轨道能量', () => {
+      this.callbacks.onToggleEnergyPanel();
+    });
+    section.appendChild(energyBtn);
 
     return section;
   }
@@ -264,6 +334,12 @@ export class UIManager {
     return btn;
   }
 
+  private createSimToggleButton(text: string, _id: string, onClick: () => void): HTMLButtonElement {
+    const btn = this.createButton(text, onClick, true);
+    btn.dataset.simmode = _id;
+    return btn;
+  }
+
   private createInfoPanel(): void {
     this.infoPanel = document.createElement('div');
     this.infoPanel.style.cssText = `
@@ -283,6 +359,125 @@ export class UIManager {
       z-index: 100;
     `;
     this.container.appendChild(this.infoPanel);
+  }
+
+  private createEnergyPanel(): void {
+    this.energyPanel = document.createElement('div');
+    this.energyPanel.style.cssText = `
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      background: rgba(10, 15, 30, 0.9);
+      color: white;
+      padding: 16px;
+      border-radius: 12px;
+      font-size: 12px;
+      min-width: 360px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(100, 150, 255, 0.2);
+      backdrop-filter: blur(10px);
+      display: none;
+      z-index: 100;
+    `;
+
+    const titleRow = document.createElement('div');
+    titleRow.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;';
+
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size: 14px; font-weight: bold; color: #6af;';
+    title.textContent = '⚡ 轨道能量面板';
+
+    const closeBtn = document.createElement('div');
+    closeBtn.innerHTML = '✕';
+    closeBtn.style.cssText = 'cursor: pointer; color: #889; font-size: 14px;';
+    closeBtn.addEventListener('click', () => {
+      this.energyPanelVisible = false;
+      this.energyPanel.style.display = 'none';
+    });
+
+    titleRow.appendChild(title);
+    titleRow.appendChild(closeBtn);
+    this.energyPanel.appendChild(titleRow);
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display: grid; grid-template-columns: 80px 1fr 1fr 1fr; gap: 4px; padding: 4px 0; border-bottom: 1px solid rgba(100, 150, 255, 0.2); margin-bottom: 4px; font-size: 10px; color: #88a; text-transform: uppercase; letter-spacing: 0.5px;';
+    header.innerHTML = '<span>天体</span><span style="text-align:right">动能</span><span style="text-align:right">势能</span><span style="text-align:right">总能量</span>';
+    this.energyPanel.appendChild(header);
+
+    const content = document.createElement('div');
+    content.id = 'energyContent';
+    this.energyPanel.appendChild(content);
+
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size: 10px; color: #667; margin-top: 8px; line-height: 1.3;';
+    note.innerHTML = '比轨道能量 (AU²/day²) · 总能量守恒验证 N-body 积分精度';
+    this.energyPanel.appendChild(note);
+
+    this.container.appendChild(this.energyPanel);
+  }
+
+  public updateEnergyPanel(energies: OrbitalEnergyInfo[] | null, systemEnergy?: { total: number; initial: number; driftPercent: number } | null): void {
+    const content = document.getElementById('energyContent');
+    if (!content || !energies) return;
+
+    let html = '';
+    for (const e of energies) {
+      if (e.name === 'Sun') continue;
+      html += `<div style="display: grid; grid-template-columns: 80px 1fr 1fr 1fr; gap: 4px; padding: 2px 0; font-family: monospace; font-size: 10px;">
+        <span style="color: #9ab;">${e.name}</span>
+        <span style="color: #fc6; text-align: right;">${this.formatEnergy(e.kinetic)}</span>
+        <span style="color: #f89; text-align: right;">${this.formatEnergy(e.potential)}</span>
+        <span style="color: #9f9; text-align: right;">${this.formatEnergy(e.total)}</span>
+      </div>`;
+    }
+
+    if (energies.length > 1) {
+      const totalKE = energies.reduce((s, e) => s + e.kinetic, 0);
+      const totalPE = energies.reduce((s, e) => s + e.potential, 0);
+      const totalE = energies.reduce((s, e) => s + e.total, 0);
+      html += `<div style="display: grid; grid-template-columns: 80px 1fr 1fr 1fr; gap: 4px; padding: 4px 0 0 0; margin-top: 4px; border-top: 1px solid rgba(100, 150, 255, 0.15); font-family: monospace; font-size: 10px; font-weight: bold;">
+        <span style="color: #aab;">系统总能量</span>
+        <span style="color: #fc6; text-align: right;">${this.formatEnergy(totalKE)}</span>
+        <span style="color: #f89; text-align: right;">${this.formatEnergy(totalPE)}</span>
+        <span style="color: #9f9; text-align: right;">${this.formatEnergy(totalE)}</span>
+      </div>`;
+
+      if (systemEnergy) {
+        const driftColor = Math.abs(systemEnergy.driftPercent) < 0.01 ? '#9f9' : 
+                           Math.abs(systemEnergy.driftPercent) < 0.1 ? '#fc6' : '#f89';
+        html += `<div style="display: flex; justify-content: space-between; padding: 6px 0 0 0; margin-top: 6px; border-top: 1px solid rgba(100, 150, 255, 0.1); font-family: monospace; font-size: 10px;">
+          <span style="color: #88a;">能量偏差</span>
+          <span style="color: ${driftColor}; font-weight: bold;">${systemEnergy.driftPercent >= 0 ? '+' : ''}${systemEnergy.driftPercent.toFixed(6)}%</span>
+        </div>`;
+      }
+    }
+
+    content.innerHTML = html;
+  }
+
+  private formatEnergy(value: number): string {
+    const absVal = Math.abs(value);
+    if (absVal === 0) return '0';
+    const exp = Math.floor(Math.log10(absVal));
+    const mantissa = value / Math.pow(10, exp);
+    if (Math.abs(exp) <= 2) {
+      return value.toFixed(6);
+    }
+    return mantissa.toFixed(3) + 'e' + exp;
+  }
+
+  public showEnergyPanel(): void {
+    this.energyPanelVisible = true;
+    this.energyPanel.style.display = 'block';
+  }
+
+  public hideEnergyPanel(): void {
+    this.energyPanelVisible = false;
+    this.energyPanel.style.display = 'none';
+  }
+
+  public isEnergyPanelVisible(): boolean {
+    return this.energyPanelVisible;
   }
 
   public showBodyInfo(body: BodyData, daysSinceJ2000: number): void {
@@ -398,5 +593,38 @@ export class UIManager {
         el.style.borderColor = '#567';
       }
     });
+  }
+
+  public setActiveSimMode(mode: SimulationMode): void {
+    const buttons = this.controlPanel.querySelectorAll('[data-simmode]');
+    buttons.forEach(btn => {
+      const el = btn as HTMLButtonElement;
+      if (el.dataset.simmode === mode) {
+        el.style.background = 'linear-gradient(180deg, #579 0%, #357 100%)';
+        el.style.borderColor = '#6af';
+      } else {
+        el.style.background = 'linear-gradient(180deg, #345 0%, #234 100%)';
+        el.style.borderColor = '#567';
+      }
+    });
+  }
+
+  public setPredictionActive(active: boolean): void {
+    const predictBtn = document.getElementById('predictBtn') as HTMLButtonElement | null;
+    const hideBtn = document.getElementById('hidePredictBtn') as HTMLButtonElement | null;
+
+    if (predictBtn) {
+      if (active) {
+        predictBtn.style.background = 'linear-gradient(180deg, #579 0%, #357 100%)';
+        predictBtn.style.borderColor = '#6af';
+      } else {
+        predictBtn.style.background = 'linear-gradient(180deg, #345 0%, #234 100%)';
+        predictBtn.style.borderColor = '#567';
+      }
+    }
+
+    if (hideBtn) {
+      hideBtn.style.opacity = active ? '1' : '0.5';
+    }
   }
 }

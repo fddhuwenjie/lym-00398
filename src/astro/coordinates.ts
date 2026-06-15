@@ -85,6 +85,38 @@ export function getOrbitPoints(
   return points;
 }
 
+const GM_SUN = 2.95912208286e-4;
+
+export function orbitalElementsToVelocity(
+  elements: OrbitalElements,
+  t: number
+): Vector3 {
+  const M = getMeanAnomaly(elements.M0, elements.period, t);
+  const v = meanToTrueAnomaly(M, elements.e);
+
+  const mu = GM_SUN;
+  const h = Math.sqrt(mu * elements.a * (1 - elements.e * elements.e));
+
+  const vP = -(mu / h) * Math.sin(v);
+  const vQ = (mu / h) * (elements.e + Math.cos(v));
+
+  const cosOmega = Math.cos(elements.Omega);
+  const sinOmega = Math.sin(elements.Omega);
+  const cosI = Math.cos(elements.i);
+  const sinI = Math.sin(elements.i);
+  const cosOmegaBar = Math.cos(elements.omega);
+  const sinOmegaBar = Math.sin(elements.omega);
+
+  const vx = (cosOmega * cosOmegaBar - sinOmega * sinOmegaBar * cosI) * vP +
+             (-cosOmega * sinOmegaBar - sinOmega * cosOmegaBar * cosI) * vQ;
+  const vy = (sinOmega * cosOmegaBar + cosOmega * sinOmegaBar * cosI) * vP +
+             (-sinOmega * sinOmegaBar + cosOmega * cosOmegaBar * cosI) * vQ;
+  const vz = (sinOmegaBar * sinI) * vP +
+             (cosOmegaBar * sinI) * vQ;
+
+  return { x: vx, y: vy, z: vz };
+}
+
 export function getOrbitalPeriod(a: number, mu: number = 1.32712440018e20): number {
   return 2 * Math.PI * Math.sqrt((a * 1000) ** 3 / mu) / 86400;
 }

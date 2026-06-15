@@ -1,11 +1,13 @@
 import * as THREE from 'three';
-import { BodyData, ScaleMode } from '../types';
+import { BodyData, ScaleMode, SimulationMode } from '../types';
 import { SUN_DATA, PLANET_DATA, MOON_DATA } from '../data/bodies';
 import { createSun, createPlanet, createMoon, createSaturnRings } from './bodies';
 import { createOrbitLine } from './orbit';
 import { createStarField } from './starfield';
-import { orbitalElementsToPosition, eclipticToThreeJs } from '../astro/coordinates';
+import { orbitalElementsToPosition, orbitalElementsToVelocity, eclipticToThreeJs, Vector3 } from '../astro/coordinates';
 import { getDistanceScale, SCALE_CONFIG } from './scale';
+import { NBodyState, OrbitalEnergyInfo, createNBodyState, integrateNBody, predictTrajectories, computeOrbitalEnergies, computeTotalSystemEnergy } from '../astro/nbody';
+import { createTrajectoryLine } from './trajectory';
 
 export interface BodyObject {
   data: BodyData;
@@ -13,15 +15,26 @@ export interface BodyObject {
   orbitLine?: THREE.Line;
   parentObject?: THREE.Object3D;
   ringMesh?: THREE.Mesh | null;
+  predictionLine?: THREE.Line | null;
 }
+
+const SUN_MASS_SOLAR = 1.0;
+const KG_PER_SOLAR_MASS = 1.989e30;
 
 export class SolarSystem {
   public scene: THREE.Scene;
   public bodies: Map<string, BodyObject> = new Map();
   public sunMesh!: THREE.Mesh;
   public scaleMode: ScaleMode = 'exaggerated';
+  public simulationMode: SimulationMode = 'kepler';
 
   private starField!: THREE.Points;
+  private nbodyState: NBodyState | null = null;
+  private nbodyCurrentJD: number = 0;
+  private initialSystemEnergy: number = 0;
+  private predictionLines: Map<string, THREE.Line> = new Map();
+  private predictionData: Map<string, Vector3[]> | null = null;
+  private showPredictions: boolean = false;
 
   constructor() {
     this.scene = new THREE.Scene();
@@ -106,29 +119,170 @@ export class SolarSystem {
     }
   }
 
+  public setSimulationMode(mode: SimulationMode): void {
+    if (this.simulationMode === mode) return;
+    this.simulationMode = mode;
+
+    if (mode === 'nbody') {
+      this.clearPredictionLines();
+      this.showPredictions = false;
+    }
+  }
+
+  public initNBody(daysSinceJ2000: number): void {
+    const bodyInitData: Array<{ name: string; mass: number; pos: Vector3; vel: Vector3 }> = [];
+
+    bodyInitData.push({
+      name: 'Sun',
+      mass: SUN_MASS_SOLAR,
+      pos: { x: 0, y: 0, z: 0 },
+      vel: { x: 0, y: 0, z: 0 },
+    });
+
+    for (const planetData of PLANET_DATA) {
+      if (!planetData.orbitalElements) continue;
+      const massSolar = planetData.mass / KG_PER_SOLAR_MASS;
+      const pos = orbitalElementsToPosition(planetData.orbitalElements, daysSinceJ2000);
+      const vel = orbitalElementsToVelocity(planetData.orbitalElements, daysSinceJ2000);
+      bodyInitData.push({ name: planetData.name, mass: massSolar, pos, vel });
+    }
+
+    this.nbodyState = createNBodyState(bodyInitData);
+    this.nbodyCurrentJD = daysSinceJ2000;
+    this.initialSystemEnergy = computeTotalSystemEnergy(this.nbodyState);
+  }
+
+  public updateNBody(deltaDays: number): void {
+    if (!this.nbodyState) return;
+
+    const dt = 0.5;
+    const steps = Math.max(1, Math.round(Math.abs(deltaDays) / dt));
+    const actualDt = deltaDays / steps;
+
+    integrateNBody(this.nbodyState, actualDt, steps);
+    this.nbodyCurrentJD += deltaDays;
+  }
+
   public update(daysSinceJ2000: number): void {
     const distanceScale = getDistanceScale(this.scaleMode);
 
-    for (const bodyObj of this.bodies.values()) {
-      if (!bodyObj.data.orbitalElements) continue;
+    if (this.simulationMode === 'nbody' && this.nbodyState) {
+      for (const bodyObj of this.bodies.values()) {
+        if (bodyObj.data.type === 'moon' || !bodyObj.data.orbitalElements) continue;
 
-      const pos = orbitalElementsToPosition(bodyObj.data.orbitalElements, daysSinceJ2000);
-      const threePos = eclipticToThreeJs(pos);
+        const nbodyBody = this.nbodyState.bodies.find(b => b.name === bodyObj.data.name);
+        if (!nbodyBody) continue;
 
-      if (bodyObj.data.type === 'planet') {
-        bodyObj.mesh.position.set(
-          threePos.x * distanceScale,
-          threePos.y * distanceScale,
-          threePos.z * distanceScale
-        );
-      } else if (bodyObj.data.type === 'moon' && bodyObj.parentObject) {
+        const threePos = eclipticToThreeJs(nbodyBody.pos);
         bodyObj.mesh.position.set(
           threePos.x * distanceScale,
           threePos.y * distanceScale,
           threePos.z * distanceScale
         );
       }
+
+      for (const moonData of MOON_DATA) {
+        const moonBody = this.bodies.get(moonData.name);
+        if (!moonBody || !moonData.orbitalElements) continue;
+
+        const pos = orbitalElementsToPosition(moonData.orbitalElements, daysSinceJ2000);
+        const threePos = eclipticToThreeJs(pos);
+        moonBody.mesh.position.set(
+          threePos.x * distanceScale,
+          threePos.y * distanceScale,
+          threePos.z * distanceScale
+        );
+      }
+    } else {
+      for (const bodyObj of this.bodies.values()) {
+        if (!bodyObj.data.orbitalElements) continue;
+
+        const pos = orbitalElementsToPosition(bodyObj.data.orbitalElements, daysSinceJ2000);
+        const threePos = eclipticToThreeJs(pos);
+
+        if (bodyObj.data.type === 'planet') {
+          bodyObj.mesh.position.set(
+            threePos.x * distanceScale,
+            threePos.y * distanceScale,
+            threePos.z * distanceScale
+          );
+        } else if (bodyObj.data.type === 'moon' && bodyObj.parentObject) {
+          bodyObj.mesh.position.set(
+            threePos.x * distanceScale,
+            threePos.y * distanceScale,
+            threePos.z * distanceScale
+          );
+        }
+      }
     }
+  }
+
+  public computePrediction(durationYears: number = 100): void {
+    if (!this.nbodyState) return;
+
+    const durationDays = durationYears * 365.25;
+    const sampleIntervalDays = 30;
+
+    const trajectories = predictTrajectories(this.nbodyState, durationDays, sampleIntervalDays);
+
+    this.predictionData = new Map(trajectories);
+    this.createPredictionLinesFromData();
+
+    this.showPredictions = true;
+  }
+
+  private createPredictionLinesFromData(): void {
+    if (!this.predictionData) return;
+
+    this.clearPredictionLines();
+
+    for (const [name, points] of this.predictionData) {
+      const bodyObj = this.bodies.get(name);
+      if (!bodyObj || points.length < 2) continue;
+
+      const color = bodyObj.data.color;
+      const line = createTrajectoryLine(points, color, this.scaleMode);
+      this.scene.add(line);
+      this.predictionLines.set(name, line);
+      bodyObj.predictionLine = line;
+    }
+  }
+
+  private clearPredictionLines(): void {
+    for (const [name, line] of this.predictionLines) {
+      this.scene.remove(line);
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+      const bodyObj = this.bodies.get(name);
+      if (bodyObj) bodyObj.predictionLine = null;
+    }
+    this.predictionLines.clear();
+  }
+
+  public hidePredictions(): void {
+    this.clearPredictionLines();
+    this.predictionData = null;
+    this.showPredictions = false;
+  }
+
+  public isShowingPredictions(): boolean {
+    return this.showPredictions;
+  }
+
+  public getOrbitalEnergies(): OrbitalEnergyInfo[] | null {
+    if (!this.nbodyState) return null;
+    return computeOrbitalEnergies(this.nbodyState);
+  }
+
+  public getSystemEnergy(): { total: number; initial: number; driftPercent: number } | null {
+    if (!this.nbodyState || this.initialSystemEnergy === 0) return null;
+    const current = computeTotalSystemEnergy(this.nbodyState);
+    const driftPercent = ((current - this.initialSystemEnergy) / Math.abs(this.initialSystemEnergy)) * 100;
+    return { total: current, initial: this.initialSystemEnergy, driftPercent };
+  }
+
+  public getNBodyState(): NBodyState | null {
+    return this.nbodyState;
   }
 
   public getBodyPosition(name: string): THREE.Vector3 | null {
@@ -147,6 +301,10 @@ export class SolarSystem {
   }
 
   private rebuildScene(): void {
+    const hadPredictions = this.showPredictions;
+
+    this.clearPredictionLines();
+
     for (const bodyObj of this.bodies.values()) {
       this.scene.remove(bodyObj.mesh);
       if (bodyObj.orbitLine) {
@@ -163,6 +321,11 @@ export class SolarSystem {
     }
 
     this.init();
+
+    if (hadPredictions && this.predictionData) {
+      this.createPredictionLinesFromData();
+      this.showPredictions = true;
+    }
   }
 
   public getClickableObjects(): THREE.Object3D[] {
